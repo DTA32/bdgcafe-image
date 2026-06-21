@@ -13,7 +13,29 @@
 	"upload_source_maps": true,
 	"compatibility_flags": [
 		"nodejs_compat"
-	]
+	],
+	/**
+	 * Serve image.bdgcafe.com from this Worker (custom domain).
+	 * Remove the bucket's public r2.dev access / public custom domain first,
+	 * otherwise the un-watermarked originals stay reachable directly.
+	 */
+	"routes": [
+		{ "pattern": "image.bdgcafe.com", "custom_domain": true }
+	],
+	/**
+	 * Private R2 bucket — read through this binding only (no public URL).
+	 */
+	"r2_buckets": [
+		{ "binding": "BUCKET", "bucket_name": "bdgcafe" }
+	],
+	/**
+	 * Images binding does the resize + watermark.
+	 * `remote: true` lets `wrangler dev` use it without `--remote`.
+	 */
+	"images": {
+		"binding": "IMAGES",
+		"remote": true
+	}
 	/**
 	 * Smart Placement
 	 * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
