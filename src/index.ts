@@ -58,6 +58,26 @@ function intParam(params: URLSearchParams, ...names: string[]): number | undefin
 	return undefined;
 }
 
+/**
+ * True if `key` matches any entry in the comma/newline-separated bypass list.
+ * Entry forms: exact ("a/b.jpg"), folder ("a/" => prefix), wildcard ("a/b-*" => prefix).
+ */
+export function isWatermarkBypassed(key: string, list: string | undefined): boolean {
+	if (!list) return false;
+	for (const raw of list.split(/[\n,]/)) {
+		const entry = raw.trim();
+		if (!entry) continue;
+		if (entry.endsWith("*")) {
+			if (key.startsWith(entry.slice(0, -1))) return true;
+		} else if (entry.endsWith("/")) {
+			if (key.startsWith(entry)) return true;
+		} else if (key === entry) {
+			return true;
+		}
+	}
+	return false;
+}
+
 export default {
 	async fetch(request, env, ctx): Promise<Response> {
 		if (request.method !== "GET" && request.method !== "HEAD") {
@@ -75,6 +95,9 @@ export default {
 		if (!key || key.includes("..") || key === WATERMARK_KEY) {
 			return new Response("Not Found", { status: 404 });
 		}
+
+		// Paths on the bypass list are served without a watermark.
+		const bypass = isWatermarkBypassed(key, env.WATERMARK_BYPASS);
 
 		// Parse + validate params.
 		const p = url.searchParams;
@@ -108,6 +131,9 @@ export default {
 		ck.searchParams.set("quality", String(quality));
 		if (reqWidth || reqHeight) ck.searchParams.set("fit", fit!);
 		ck.searchParams.set("format", format);
+		// Distinguish un-watermarked entries so toggling the bypass list never
+		// serves a stale watermarked (or un-watermarked) copy from cache.
+		if (bypass) ck.searchParams.set("wm", "0");
 		const cacheKey = new Request(ck.toString(), { method: "GET" });
 
 		const cache = caches.default;
@@ -116,13 +142,13 @@ export default {
 			if (hit) return hit;
 		}
 
-		// Read original + watermark straight from the private bucket.
+		// Read original (+ watermark, unless bypassed) straight from the private bucket.
 		const [object, watermark] = await Promise.all([
 			env.BUCKET.get(key),
-			env.BUCKET.get(WATERMARK_KEY),
+			bypass ? Promise.resolve(null) : env.BUCKET.get(WATERMARK_KEY),
 		]);
 		if (!object) return new Response("Not Found", { status: 404 });
-		if (!watermark) return new Response("Watermark asset missing", { status: 500 });
+		if (!bypass && !watermark) return new Response("Watermark asset missing", { status: 500 });
 
 		try {
 			const originalBytes = await object.arrayBuffer();
@@ -143,30 +169,32 @@ export default {
 				transform.fit = "scale-down";
 			}
 
-			// Estimate the rendered width so the centered watermark scales sensibly.
-			let renderedWidth: number;
-			if (transform.width !== undefined) {
-				renderedWidth = srcW !== undefined ? Math.min(transform.width, srcW) : transform.width;
-			} else if (reqHeight && srcW && srcH) {
-				renderedWidth = Math.min(Math.round(reqHeight * (srcW / srcH)), srcW);
-			} else {
-				renderedWidth = srcW ?? FALLBACK_WIDTH;
-			}
-			const watermarkWidth = Math.max(1, Math.round(renderedWidth * WATERMARK_SCALE));
-
 			let pipeline = env.IMAGES.input(bytesToStream(originalBytes));
 			if (Object.keys(transform).length > 0) {
 				pipeline = pipeline.transform(transform);
 			}
 
-			const result = await pipeline
-				.draw(
-					env.IMAGES
-						.input(watermark.body)
-						.transform({ width: watermarkWidth, fit: "contain" }),
+			// Watermark unless this path is on the bypass list.
+			if (watermark) {
+				// Size the watermark relative to the rendered width (centered).
+				let renderedWidth: number;
+				if (transform.width !== undefined) {
+					renderedWidth = srcW !== undefined ? Math.min(transform.width, srcW) : transform.width;
+				} else if (reqHeight && srcW && srcH) {
+					renderedWidth = Math.min(Math.round(reqHeight * (srcW / srcH)), srcW);
+				} else {
+					renderedWidth = srcW ?? FALLBACK_WIDTH;
+				}
+				const watermarkWidth = Math.max(1, Math.round(renderedWidth * WATERMARK_SCALE));
+
+				pipeline = pipeline.draw(
+					// `fit: contain` lets the small watermark upscale to the target width.
+					env.IMAGES.input(watermark.body).transform({ width: watermarkWidth, fit: "contain" }),
 					{ opacity: WATERMARK_OPACITY }, // no top/left/bottom/right => centered
-				)
-				.output({ format, quality });
+				);
+			}
+
+			const result = await pipeline.output({ format, quality });
 
 			// Re-wrap so we can attach cache headers (binding headers are immutable).
 			const headers = new Headers({

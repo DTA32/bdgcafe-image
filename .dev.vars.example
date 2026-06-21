@@ -1,0 +1,9 @@
+# Comma- or newline-separated R2 object paths served WITHOUT a watermark.
+# Matching forms:
+#   exact     logos/bdgcafe-logo.png    -> only that object
+#   folder    partners/                 -> trailing "/" = prefix match (whole folder)
+#   wildcard  promos/2026-*             -> trailing "*" = prefix match
+#
+# Local dev reads this from .dev.vars; in production set it as a secret:
+#   npx wrangler secret put WATERMARK_BYPASS
+WATERMARK_BYPASS=""
